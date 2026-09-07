@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { prisma, dbConfig } from "@/lib/prisma"
-import { getAdminSession } from "@/lib/api-auth"
+import { getOwnerSession } from "@/lib/api-auth"
 
 interface DatabaseInfo {
   type: "sqlite" | "postgres"
@@ -13,7 +13,7 @@ interface DatabaseInfo {
 }
 
 export async function GET() {
-  if (!(await getAdminSession())) {
+  if (!(await getOwnerSession())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
   try {

@@ -6,7 +6,7 @@ import { clearSessionCookies } from "@/lib/auth-cookies"
 export async function GET() {
   try {
     // 签名会话校验：伪造/过期/非 ADMIN 的 cookie 在此被拒绝
-    const session = await getAdminSession()
+    const session = await getAdminSession({ allowPasswordChangeRequired: true })
     if (!session) {
       return NextResponse.json({ user: null }, { status: 401 })
     }
@@ -18,10 +18,13 @@ export async function GET() {
         email: true,
         name: true,
         avatar: true,
+        role: true,
+        mustChangePassword: true,
+        isActive: true,
       },
     })
 
-    if (!user) {
+    if (!user || !user.isActive) {
       // 会话指向的用户已不存在（数据库重建/切换部署模式的残留会话）：
       // 清除无效会话 cookie，使 middleware 与本接口（查库校验）判断恢复一致
       const response = NextResponse.json({ user: null }, { status: 401 })

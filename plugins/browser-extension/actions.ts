@@ -1,14 +1,14 @@
 "use server"
 
 import { randomBytes } from "crypto"
-import { getAdminSession } from "@/lib/api-auth"
+import { getOwnerSession } from "@/lib/api-auth"
 import { updatePluginConfig } from "@/lib/plugins/plugin-actions"
 import { PLUGIN_ID } from "./constants"
 
 // 与 plugin-actions 相同的管理员判定（双层校验：签名 + 角色确认）
 async function requireAdminRole(): Promise<{ success: false; error: string } | null> {
-  if (!(await getAdminSession())) {
-    return { success: false, error: "Unauthorized" }
+  if (!(await getOwnerSession())) {
+    return { success: false, error: "OWNER_REQUIRED" }
   }
   return null
 }

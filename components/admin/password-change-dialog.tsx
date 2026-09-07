@@ -13,7 +13,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Loader2 } from "lucide-react"
-import { changePassword } from "@/lib/actions"
 import { toast } from "sonner"
 import { useTranslations } from "next-intl"
 import { resolveActionError } from "@/lib/action-error"
@@ -21,7 +20,6 @@ import { resolveActionError } from "@/lib/action-error"
 interface PasswordChangeDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  userId: string
   userEmail: string
 }
 
@@ -41,7 +39,7 @@ export function PasswordChangeDialog({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (password.length < 6) {
+    if (password.length < 8) {
       toast.error(t("passwordTooShort"), {
         description: t("passwordTooShortDesc"),
       })
@@ -64,9 +62,13 @@ export function PasswordChangeDialog({
 
     setLoading(true)
     try {
-      // 以当前会话身份为准，服务端强制校验旧密码
-      const result = await changePassword(currentPassword, password)
-      if (result.success) {
+      const response = await fetch("/api/admin/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword, newPassword: password }),
+      })
+      const result = await response.json()
+      if (response.ok && result.success) {
         toast.success(t("passwordChanged"), {
           description: t("passwordChangedDesc"),
         })
@@ -120,7 +122,7 @@ export function PasswordChangeDialog({
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={t("passwordPlaceholder")}
                 required
-                minLength={6}
+                minLength={8}
               />
             </div>
             <div className="space-y-2">
@@ -132,7 +134,7 @@ export function PasswordChangeDialog({
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder={t("confirmPasswordPlaceholder")}
                 required
-                minLength={6}
+                minLength={8}
               />
             </div>
           </div>

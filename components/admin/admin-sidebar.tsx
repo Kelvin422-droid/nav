@@ -13,6 +13,7 @@ import {
   Database,
   Layers,
   Puzzle,
+  Settings,
 } from "lucide-react"
 import {
   Sidebar,
@@ -30,6 +31,7 @@ import {
 import { AdminAvatar } from "./admin-avatar"
 import { VersionBadge } from "./version-badge"
 import { fetchPublicSettings } from "@/lib/client-settings"
+import { useAdminAuth } from "@/components/auth/admin-auth-provider"
 
 // 菜单标题使用 admin.sidebar 命名空间的消息 key
 const navItems = [
@@ -52,6 +54,7 @@ const navItems = [
     titleKey: "data",
     href: "/admin/data",
     icon: Database,
+    ownerOnly: true,
   },
   {
     titleKey: "workspaces",
@@ -62,17 +65,25 @@ const navItems = [
     titleKey: "plugins",
     href: "/admin/plugins",
     icon: Puzzle,
+    ownerOnly: true,
+  },
+  {
+    titleKey: "admins",
+    href: "/admin/admins",
+    icon: Users,
   },
   {
     titleKey: "settings",
     href: "/admin/users",
-    icon: Users,
+    icon: Settings,
+    ownerOnly: true,
   },
 ] as const
 
 export function AdminSidebar() {
   const pathname = usePathname()
   const t = useTranslations("admin.sidebar")
+  const { role } = useAdminAuth()
   const [siteName, setSiteName] = useState("Conan Nav")
   const [siteLogo, setSiteLogo] = useState<string | null>(null)
 
@@ -130,7 +141,9 @@ export function AdminSidebar() {
           <SidebarGroupLabel className="px-2 text-xs text-muted-foreground">{t("menuLabel")}</SidebarGroupLabel>
           <SidebarGroupContent className="mt-1">
             <SidebarMenu>
-              {navItems.map((item) => (
+              {navItems
+                .filter((item) => !("ownerOnly" in item && item.ownerOnly && role !== "OWNER"))
+                .map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild

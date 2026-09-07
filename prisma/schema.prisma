@@ -123,20 +123,46 @@ model Screenshot {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String
-  name      String?
-  avatar    String?
-  role      UserRole @default(ADMIN)
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  password           String
+  name               String?
+  avatar             String?
+  role               UserRole @default(ADMIN)
+  isActive            Boolean  @default(true) @map("is_active")
+  mustChangePassword  Boolean  @default(false) @map("must_change_password")
+  lastLoginAt         DateTime? @map("last_login_at")
+  // 仅保存创建者快照 ID，不设外键：删除创建者后仍可保留账号来源与审计链路。
+  createdById         String?   @map("created_by_id")
   // 改密时间：会话校验时与 token 签发时间比对，改密后吊销所有旧会话（null=从未改密）
   passwordChangedAt DateTime? @map("password_changed_at")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([role, isActive])
 }
 
 enum UserRole {
+  OWNER
   ADMIN
+}
+
+// 管理员账号生命周期审计。邮箱与操作者信息以快照形式保存，
+// 即使目标账号随后被删除，历史记录仍可追溯。
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  actorId     String?  @map("actor_id")
+  actorEmail  String   @map("actor_email")
+  action      String
+  targetUserId String? @map("target_user_id")
+  targetEmail String?  @map("target_email")
+  metadata    String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([createdAt])
+  @@map("AdminAuditLog")
 }
 
 model SystemSettings {

@@ -30,7 +30,6 @@ interface UpdatedUser {
 interface UserEditDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  userId: string
   userEmail: string
   userName?: string | null
   onUpdate?: (user: UpdatedUser) => void
@@ -39,7 +38,6 @@ interface UserEditDialogProps {
 export function UserEditDialog({
   open,
   onOpenChange,
-  userId,
   userEmail,
   userName,
   onUpdate,
@@ -90,7 +88,7 @@ export function UserEditDialog({
     }
 
     // 如果填写了密码，验证密码
-    if (password && password.length < 6) {
+    if (password && password.length < 8) {
       toast.error(t("passwordTooShort"), {
         description: t("passwordTooShortDesc"),
       })
@@ -163,7 +161,7 @@ export function UserEditDialog({
         return
       }
 
-      const result = await updateUser(userId, updateData)
+      const result = await updateUser(updateData)
       if (result.success) {
         toast.success(t("updateSuccess"), {
           description: t("updateSuccessDesc"),

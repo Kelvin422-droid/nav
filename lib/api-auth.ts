@@ -4,7 +4,19 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "./session"
 
 export interface AdminSession {
   userId: string
-  role: string
+  role: "OWNER" | "ADMIN"
+  email: string
+  name: string | null
+  mustChangePassword: boolean
+  iat?: number
+}
+
+interface AdminSessionOptions {
+  allowPasswordChangeRequired?: boolean
+}
+
+export function isAdminRole(role: unknown): role is AdminSession["role"] {
+  return role === "OWNER" || role === "ADMIN"
 }
 
 /**
@@ -15,28 +27,53 @@ export interface AdminSession {
  * 三层校验：签名验证防伪造，查库确认防数据库重建/删除用户后
  * 旧 token 在有效期内继续生效，改密时间比对保证改密后旧会话立即失效。
  */
-export async function getAdminSession(): Promise<AdminSession | null> {
+export async function getAdminSession(
+  options: AdminSessionOptions = {}
+): Promise<AdminSession | null> {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value
   if (!token) return null
   const session = await verifySessionToken(token)
-  if (!session || session.role !== "ADMIN") return null
+  if (!session || !isAdminRole(session.role)) return null
 
   const user = await prisma.user.findUnique({
     where: { id: session.userId },
-    select: { role: true, passwordChangedAt: true },
+    select: {
+      role: true,
+      email: true,
+      name: true,
+      isActive: true,
+      mustChangePassword: true,
+      passwordChangedAt: true,
+    },
   })
-  if (!user || user.role !== "ADMIN") return null
+  if (!user || !isAdminRole(user.role) || !user.isActive) return null
 
-  // 改密吊销：token 签发早于最近一次改密即失效。iat 为秒级、changedAt 为毫秒级，
-  // 改密时间截断到秒再比较，避免「改密后同一秒内重新登录的新 token 被误杀」；
-  // 旧版 token 无签发时间（iat 缺失），无法证明晚于改密，同样拒绝——重新登录一次即可。
+  // 新 token 使用毫秒时间；兼容旧版秒级 iat。改密前签发的全部会话立即失效。
+  const issuedAtMs = session.iat === undefined
+    ? undefined
+    : session.iat < 10_000_000_000
+      ? session.iat * 1000
+      : session.iat
   if (
     user.passwordChangedAt &&
-    (session.iat === undefined ||
-      session.iat < Math.floor(user.passwordChangedAt.getTime() / 1000))
+    (issuedAtMs === undefined || issuedAtMs <= user.passwordChangedAt.getTime())
   ) {
     return null
   }
 
-  return session
+  return {
+    userId: session.userId,
+    role: user.role,
+    email: user.email,
+    name: user.name,
+    mustChangePassword: user.mustChangePassword,
+    iat: session.iat,
+  }
+}
+
+export async function getOwnerSession(
+  options: AdminSessionOptions = {}
+): Promise<AdminSession | null> {
+  const session = await getAdminSession(options)
+  return session?.role === "OWNER" ? session : null
 }

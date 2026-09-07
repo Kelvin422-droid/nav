@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { importData } from '@/lib/actions'
-import { getAdminSession } from '@/lib/api-auth'
+import { getOwnerSession } from '@/lib/api-auth'
 
 export async function POST(request: NextRequest) {
-  if (!(await getAdminSession())) {
+  if (!(await getOwnerSession())) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   try {

@@ -3,9 +3,13 @@ import { getAdminSession } from "@/lib/api-auth"
 
 export async function GET() {
   try {
-    const session = await getAdminSession()
+    const session = await getAdminSession({ allowPasswordChangeRequired: true })
     return NextResponse.json(
-      { isAdmin: Boolean(session) },
+      {
+        isAdmin: Boolean(session),
+        role: session?.role ?? null,
+        mustChangePassword: session?.mustChangePassword ?? false,
+      },
       {
         headers: {
           "Cache-Control": "no-store, max-age=0",

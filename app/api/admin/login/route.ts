@@ -9,10 +9,12 @@ import {
   recordLoginFailure,
   recordLoginSuccess,
 } from "@/lib/login-rate-limit"
+import { isAdminRole } from "@/lib/api-auth"
+import { recordAdminAudit } from "@/lib/admin-audit"
 
 // 定义登录验证schema
 const loginSchema = z.object({
-  email: z.string().email("请输入有效的邮箱地址"),
+  email: z.string().trim().toLowerCase().email("请输入有效的邮箱地址"),
   password: z.string().min(6, "密码至少需要6个字符"),
 })
 
@@ -52,9 +54,11 @@ export async function POST(request: NextRequest) {
     }
 
     // 查找用户
-    const user = await prisma.user.findUnique({
-      where: { email },
-    })
+    // 兼容升级前可能含大写字母的旧邮箱；新写入统一使用小写。
+    const candidates = await prisma.user.findMany()
+    const user = candidates.find(
+      (candidate) => candidate.email.toLowerCase() === email
+    )
 
     if (!user) {
       recordLoginFailure(clientIp, email)
@@ -76,7 +80,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 检查是否是管理员
-    if (user.role !== "ADMIN") {
+    if (!isAdminRole(user.role)) {
       recordLoginFailure(clientIp, email)
       return NextResponse.json(
         { error: "无权限访问管理后台" },
@@ -84,13 +88,42 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    if (!user.isActive) {
+      recordLoginFailure(clientIp, email)
+      return NextResponse.json(
+        { error: "账号已停用，请联系所有者" },
+        { status: 403 }
+      )
+    }
+
     recordLoginSuccess(email)
+    await prisma.user.update({
+      where: { id: user.id },
+      // 旧版本可能留下 mustChangePassword=true；新规则不再强制首次改密。
+      data: { lastLoginAt: new Date(), mustChangePassword: false },
+    })
+    await recordAdminAudit({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: "LOGIN_SUCCESS",
+      targetUserId: user.id,
+      targetEmail: user.email,
+    })
 
     // 创建 session：签发 HMAC 签名会话 token（双 Set-Cookie 策略：Lax 保底 + None/Secure 覆盖），
     // HTTP 与 HTTPS、直连与反向代理、iframe 预览环境均可用，详见 lib/auth-cookies.ts
-    const sessionToken = await createSessionToken(user.id, user.role)
+    const sessionToken = await createSessionToken(
+      user.id,
+      user.role,
+      false
+    )
     return jsonResponseWithSession(
-      { success: true, message: "登录成功" },
+      {
+        success: true,
+        message: "登录成功",
+        role: user.role,
+        mustChangePassword: false,
+      },
       sessionToken
     )
   } catch (error) {

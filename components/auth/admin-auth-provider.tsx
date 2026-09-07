@@ -4,27 +4,36 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 
 interface AdminAuthContextValue {
   isAdmin: boolean
+  role: "OWNER" | "ADMIN" | null
+  mustChangePassword: boolean
   refreshAdminStatus: () => Promise<void>
 }
 
 const AdminAuthContext = createContext<AdminAuthContextValue>({
   isAdmin: false,
+  role: null,
+  mustChangePassword: false,
   refreshAdminStatus: async () => {},
 })
 
 export function AdminAuthProvider({
   initialIsAdmin = false,
+  initialRole = null,
   children,
 }: {
   initialIsAdmin?: boolean
+  initialRole?: "OWNER" | "ADMIN" | null
   children: React.ReactNode
 }) {
   const [isAdmin, setIsAdmin] = useState(Boolean(initialIsAdmin))
+  const [role, setRole] = useState<"OWNER" | "ADMIN" | null>(initialRole)
+  const [mustChangePassword, setMustChangePassword] = useState(false)
 
   // 当服务端直出值变更（如路由刷新、页面切换）时同步最新状态
   useEffect(() => {
     setIsAdmin(Boolean(initialIsAdmin))
-  }, [initialIsAdmin])
+    setRole(initialRole)
+  }, [initialIsAdmin, initialRole])
 
   const refreshAdminStatus = useCallback(async () => {
     try {
@@ -35,6 +44,8 @@ export function AdminAuthProvider({
       if (res.ok) {
         const data = await res.json()
         setIsAdmin(Boolean(data.isAdmin))
+        setRole(data.role === "OWNER" || data.role === "ADMIN" ? data.role : null)
+        setMustChangePassword(Boolean(data.mustChangePassword))
       }
     } catch {
       // 忽略临时网络异常
@@ -54,7 +65,7 @@ export function AdminAuthProvider({
   }, [refreshAdminStatus])
 
   return (
-    <AdminAuthContext.Provider value={{ isAdmin, refreshAdminStatus }}>
+    <AdminAuthContext.Provider value={{ isAdmin, role, mustChangePassword, refreshAdminStatus }}>
       {children}
     </AdminAuthContext.Provider>
   )

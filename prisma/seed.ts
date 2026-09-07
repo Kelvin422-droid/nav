@@ -131,10 +131,18 @@ async function main() {
 
   // 检查是否已初始化
   const userCount = await prisma.user.count()
+  const ownerCount = await prisma.user.count({ where: { role: 'OWNER' } })
   const settingsExists = await prisma.systemSettings.count()
   const categoryCount = await prisma.category.count()
 
   const isInitialized = userCount > 0 || settingsExists > 0 || categoryCount > 0
+
+  // SQLite 使用 db push，没有数据迁移步骤。旧版本只有 ADMIN 角色时，
+  // 首次升级将已有账号提升为 OWNER；已有 OWNER 后不再触碰子管理员角色。
+  if (userCount > 0 && ownerCount === 0) {
+    await prisma.user.updateMany({ data: { role: 'OWNER' } })
+    console.log('✓ 已将旧版管理员账号升级为所有者（OWNER）\n')
+  }
 
   if (isInitialized && mode === 'init') {
     console.log('✅ 数据库已经初始化，跳过基础数据填充')
@@ -281,7 +289,7 @@ async function main() {
 
 async function createDefaultAdmin() {
   console.log('👤 创建管理员用户...')
-  const email = process.env.ADMIN_EMAIL?.trim() || 'admin@example.com'
+  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase() || 'admin@example.com'
   const password = process.env.ADMIN_PASSWORD?.trim() || ''
   if (!password) {
     // 未通过环境变量提供口令时使用历史默认值，但必须显式警告：
@@ -300,7 +308,9 @@ async function createDefaultAdmin() {
       password: hashedPassword,
       name: '管理员',
       avatar: null, // 默认无头像，用户可在后台设置
-      role: 'ADMIN',
+      role: 'OWNER',
+      isActive: true,
+      mustChangePassword: false,
     },
   })
   console.log(`  ✓ 创建管理员: ${email}${password ? '（口令来自 ADMIN_PASSWORD 环境变量）' : ' (密码: admin123)'}\n`)

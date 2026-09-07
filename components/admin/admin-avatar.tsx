@@ -158,7 +158,6 @@ export function AdminAvatar() {
         <UserEditDialog
           open={editDialogOpen}
           onOpenChange={setEditDialogOpen}
-          userId={user.id}
           userEmail={user.email}
           userName={user.name}
           onUpdate={(updatedUser) => {

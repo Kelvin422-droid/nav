@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma"
 import { revalidatePath } from "next/cache"
-import { getAdminSession } from "@/lib/api-auth"
+import { getOwnerSession } from "@/lib/api-auth"
 import { pluginRegistry } from "./registry"
 import { validatePluginManifest } from "./manifest-schema"
 import { resolveConfig } from "./runtime"
@@ -11,8 +11,8 @@ import type { PluginConfigField, PluginManifest } from "./types"
 // 管理动作：插件启停、配置、上传、删除。
 // getAdminSession 已含双层校验（签名 + 查库确认角色），不再重复查库
 async function requireAdmin(): Promise<{ success: false; error: string } | null> {
-  if (!(await getAdminSession())) {
-    return { success: false, error: "Unauthorized" }
+  if (!(await getOwnerSession())) {
+    return { success: false, error: "OWNER_REQUIRED" }
   }
   return null
 }

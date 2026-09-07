@@ -6,6 +6,8 @@ import {
   verifySessionToken,
 } from "@/lib/session"
 
+const isAdminRole = (role: unknown) => role === "OWNER" || role === "ADMIN"
+
 // 定义受保护的路由
 // 精确匹配 /admin 本身与 /admin/ 子路径：避免把 /administrator 等无关前缀路径
 // 也重定向进登录页
@@ -19,7 +21,13 @@ const authRoutes = ["/admin/login"]
 // 未登录即可篡改系统设置、读取数据库连接信息（越权漏洞）
 const protectedApiRoutes = ["/api/admin"]
 // 登录接口自身放行（自身的凭据校验与限流见 app/api/admin/login/route.ts）
-const apiAuthExempt = ["/api/admin/login", "/api/admin/status"]
+// logout 必须始终放行：改密后旧会话会立即失效，仍需允许客户端清除旧 Cookie。
+const apiAuthExempt = [
+  "/api/admin/login",
+  "/api/admin/logout",
+  "/api/admin/change-password",
+  "/api/admin/status",
+]
 
 // 工作区预览参数是否启用：开发模式或显式开启（预览环境无子域名时调试用）
 const workspacePreviewEnabled =
@@ -123,7 +131,7 @@ export async function middleware(request: NextRequest) {
     // 明文伪造 user_id/user_role cookie 无法通过此处
     const apiToken = request.cookies.get(SESSION_COOKIE_NAME)?.value
     const apiSession = apiToken ? await verifySessionToken(apiToken) : null
-    if (!apiSession || apiSession.role !== "ADMIN") {
+    if (!apiSession || !isAdminRole(apiSession.role)) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
     return NextResponse.next({
@@ -141,7 +149,7 @@ export async function middleware(request: NextRequest) {
   // 明文伪造 user_id/user_role cookie 不再能通过此处
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value
   const session = token ? await verifySessionToken(token) : null
-  const isAdmin = session !== null && session.role === "ADMIN"
+  const isAdmin = session !== null && isAdminRole(session.role)
 
   const hasLegacyCookies = LEGACY_COOKIE_NAMES.some((name) =>
     request.cookies.has(name)
@@ -150,7 +158,10 @@ export async function middleware(request: NextRequest) {
   // 如果已登录且访问登录页，重定向到 dashboard
   if (isAdmin && isAuthRoute) {
     const response = NextResponse.redirect(
-      new URL("/admin/dashboard", request.url)
+      new URL(
+        "/admin/dashboard",
+        request.url
+      )
     )
     if (hasLegacyCookies) {
       for (const name of LEGACY_COOKIE_NAMES) response.cookies.delete(name)

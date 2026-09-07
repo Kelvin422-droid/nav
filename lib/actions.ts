@@ -17,7 +17,8 @@ function clampPagination(page?: number, pageSize?: number, defaultPageSize = 10)
     pageSize: Math.min(100, Math.max(1, toInt(pageSize, defaultPageSize))),
   }
 }
-import { getAdminSession } from "./api-auth"
+import { getAdminSession, getOwnerSession } from "./api-auth"
+import { recordAdminAudit } from "./admin-audit"
 import { verifyDomainHost } from "./domain-verify"
 import { isPluginEnabled, firePluginWebhook } from "./plugins/runtime"
 import {
@@ -40,6 +41,23 @@ import { isNextDynamicError } from "@/lib/next-errors"
 async function requireAdmin(): Promise<{ success: false; error: string } | null> {
   if (!(await getAdminSession())) {
     return { success: false, error: "Unauthorized" }
+  }
+  return null
+}
+
+async function requireOwner() {
+  const session = await getOwnerSession()
+  return session
+    ? { success: true as const, session }
+    : { success: false as const, error: "OWNER_REQUIRED" }
+}
+
+function validateAdminPassword(password: unknown) {
+  if (typeof password !== "string" || password.length < 8) {
+    return "ADMIN_PASSWORD_TOO_SHORT"
+  }
+  if (new TextEncoder().encode(password).length > 72) {
+    return "ADMIN_PASSWORD_TOO_LONG"
   }
   return null
 }
@@ -1788,18 +1806,22 @@ export async function getUsersWithPagination(params: {
   pageSize?: number
   search?: string
 }) {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const session = await getAdminSession()
+  if (!session) return { success: false, error: "Unauthorized" }
   try {
     const { page, pageSize } = clampPagination(params.page, params.pageSize)
     const skip = (page - 1) * pageSize
 
-    const where: Prisma.UserWhereInput = {}
+    // 子管理员仅能读取自己的账号；OWNER 才能读取完整账号列表。
+    const where: Prisma.UserWhereInput = session.role === "OWNER"
+      ? {}
+      : { id: session.userId }
 
-    if (params.search) {
+    const search = params.search?.trim()
+    if (search) {
       where.OR = [
-        { email: ciContains(params.search) },
-        { name: ciContains(params.search) },
+        { email: ciContains(search) },
+        { name: ciContains(search) },
       ]
     }
 
@@ -1814,6 +1836,10 @@ export async function getUsersWithPagination(params: {
           email: true,
           name: true,
           role: true,
+          isActive: true,
+          mustChangePassword: true,
+          lastLoginAt: true,
+          createdById: true,
           createdAt: true,
         },
       }),
@@ -1833,7 +1859,310 @@ export async function getUsersWithPagination(params: {
   } catch (error) {
     if (isNextDynamicError(error)) throw error
     console.error("Error fetching users with pagination:", error)
-    return { success: false, error: "Failed to fetch users" }
+    return { success: false, error: "ADMIN_LIST_FAILED" }
+  }
+}
+
+/**
+ * 创建可直接登录后台的管理员账号。
+ *
+ * 账号创建只接受服务端校验后的邮箱、姓名和初始密码；密码仅以 bcrypt 哈希入库，
+ * 响应中只返回安全展示字段。只有 OWNER 可以创建账号；新账号固定为受限 ADMIN，
+ * 使用所有者提供的初始密码即可直接登录。
+ */
+export async function createAdminUser(data: {
+  email: string
+  name?: string
+  password: string
+}) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+
+  const email = typeof data.email === "string" ? data.email.trim().toLowerCase() : ""
+  const name = typeof data.name === "string" ? data.name.trim() : ""
+  const password = typeof data.password === "string" ? data.password : ""
+
+  if (
+    email.length > 254 ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  ) {
+    return { success: false, error: "ADMIN_EMAIL_INVALID" }
+  }
+  if (name.length > 100) {
+    return { success: false, error: "ADMIN_NAME_TOO_LONG" }
+  }
+  const passwordError = validateAdminPassword(password)
+  if (passwordError) return { success: false, error: passwordError }
+
+  try {
+    // 数据库唯一约束通常区分大小写；在应用层补一层大小写不敏感检查，
+    // 避免 Admin@example.com 与 admin@example.com 成为两个后台账号。
+    const existingEmails = await prisma.user.findMany({
+      select: { email: true },
+    })
+    if (existingEmails.some((user) => user.email.toLowerCase() === email)) {
+      return { success: false, error: "ADMIN_EMAIL_EXISTS" }
+    }
+
+    const user = await prisma.user.create({
+      data: {
+        email,
+        name: name || null,
+        password: await bcrypt.hash(password, 10),
+        role: "ADMIN",
+        isActive: true,
+        mustChangePassword: false,
+        createdById: owner.session.userId,
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+        createdById: true,
+        createdAt: true,
+      },
+    })
+
+    await recordAdminAudit({
+      actorId: owner.session.userId,
+      actorEmail: owner.session.email,
+      action: "ADMIN_CREATED",
+      targetUserId: user.id,
+      targetEmail: user.email,
+      metadata: { role: user.role },
+    })
+
+    revalidatePath("/admin/admins")
+    return { success: true, data: user }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "P2002"
+    ) {
+      return { success: false, error: "ADMIN_EMAIL_EXISTS" }
+    }
+    console.error("Error creating admin user:", error)
+    return { success: false, error: "ADMIN_CREATE_FAILED" }
+  }
+}
+
+export async function setAdminActive(userId: string, isActive: boolean) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+  if (userId === owner.session.userId && !isActive) {
+    return { success: false, error: "ADMIN_SELF_DISABLE_FORBIDDEN" }
+  }
+
+  try {
+    const target = await prisma.user.findUnique({ where: { id: userId } })
+    if (!target) return { success: false, error: "USER_NOT_FOUND" }
+    if (!isActive && target.role === "OWNER" && target.isActive) {
+      const activeOwners = await prisma.user.count({
+        where: { role: "OWNER", isActive: true },
+      })
+      if (activeOwners <= 1) {
+        return { success: false, error: "ADMIN_LAST_OWNER_PROTECTED" }
+      }
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        isActive,
+        // 停用时立即吊销目标账号的全部会话。
+        ...(!isActive ? { passwordChangedAt: new Date() } : {}),
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+        createdById: true,
+        createdAt: true,
+      },
+    })
+    await recordAdminAudit({
+      actorId: owner.session.userId,
+      actorEmail: owner.session.email,
+      action: isActive ? "ADMIN_ENABLED" : "ADMIN_DISABLED",
+      targetUserId: updated.id,
+      targetEmail: updated.email,
+    })
+    revalidatePath("/admin/admins")
+    return { success: true, data: updated }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    console.error("Error changing admin status:", error)
+    return { success: false, error: "ADMIN_STATUS_UPDATE_FAILED" }
+  }
+}
+
+export async function updateAdminRole(
+  userId: string,
+  role: "OWNER" | "ADMIN"
+) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+  if (role !== "OWNER" && role !== "ADMIN") {
+    return { success: false, error: "ADMIN_ROLE_INVALID" }
+  }
+  if (userId === owner.session.userId) {
+    return { success: false, error: "ADMIN_SELF_ROLE_FORBIDDEN" }
+  }
+
+  try {
+    const target = await prisma.user.findUnique({ where: { id: userId } })
+    if (!target) return { success: false, error: "USER_NOT_FOUND" }
+    if (target.role === role) return { success: true }
+    if (target.role === "OWNER" && role === "ADMIN" && target.isActive) {
+      const activeOwners = await prisma.user.count({
+        where: { role: "OWNER", isActive: true },
+      })
+      if (activeOwners <= 1) {
+        return { success: false, error: "ADMIN_LAST_OWNER_PROTECTED" }
+      }
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: { role, passwordChangedAt: new Date() },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+        createdById: true,
+        createdAt: true,
+      },
+    })
+    await recordAdminAudit({
+      actorId: owner.session.userId,
+      actorEmail: owner.session.email,
+      action: "ADMIN_ROLE_CHANGED",
+      targetUserId: updated.id,
+      targetEmail: updated.email,
+      metadata: { from: target.role, to: updated.role },
+    })
+    revalidatePath("/admin/admins")
+    return { success: true, data: updated }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    console.error("Error changing admin role:", error)
+    return { success: false, error: "ADMIN_ROLE_UPDATE_FAILED" }
+  }
+}
+
+export async function resetAdminPassword(userId: string, password: string) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+  if (userId === owner.session.userId) {
+    return { success: false, error: "ADMIN_SELF_RESET_FORBIDDEN" }
+  }
+  const passwordError = validateAdminPassword(password)
+  if (passwordError) return { success: false, error: passwordError }
+
+  try {
+    const target = await prisma.user.findUnique({ where: { id: userId } })
+    if (!target) return { success: false, error: "USER_NOT_FOUND" }
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        password: await bcrypt.hash(password, 10),
+        passwordChangedAt: new Date(),
+        mustChangePassword: false,
+      },
+    })
+    await recordAdminAudit({
+      actorId: owner.session.userId,
+      actorEmail: owner.session.email,
+      action: "ADMIN_PASSWORD_RESET",
+      targetUserId: target.id,
+      targetEmail: target.email,
+    })
+    revalidatePath("/admin/admins")
+    return { success: true }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    console.error("Error resetting admin password:", error)
+    return { success: false, error: "ADMIN_PASSWORD_RESET_FAILED" }
+  }
+}
+
+export async function deleteAdminUser(userId: string) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+  if (userId === owner.session.userId) {
+    return { success: false, error: "ADMIN_SELF_DELETE_FORBIDDEN" }
+  }
+
+  try {
+    const target = await prisma.user.findUnique({ where: { id: userId } })
+    if (!target) return { success: false, error: "USER_NOT_FOUND" }
+    if (target.role === "OWNER") {
+      const otherActiveOwners = await prisma.user.count({
+        where: {
+          role: "OWNER",
+          isActive: true,
+          id: { not: target.id },
+        },
+      })
+      if (otherActiveOwners === 0) {
+        return { success: false, error: "ADMIN_LAST_OWNER_PROTECTED" }
+      }
+    }
+    await prisma.user.delete({ where: { id: target.id } })
+    await recordAdminAudit({
+      actorId: owner.session.userId,
+      actorEmail: owner.session.email,
+      action: "ADMIN_DELETED",
+      targetUserId: target.id,
+      targetEmail: target.email,
+      metadata: { role: target.role },
+    })
+    revalidatePath("/admin/admins")
+    return { success: true }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    console.error("Error deleting admin user:", error)
+    return { success: false, error: "ADMIN_DELETE_FAILED" }
+  }
+}
+
+export async function getAdminAuditLogs(limit = 30) {
+  const owner = await requireOwner()
+  if (!owner.success) return owner
+  try {
+    const safeLimit = Math.min(100, Math.max(1, Math.trunc(limit) || 30))
+    const logs = await prisma.adminAuditLog.findMany({
+      orderBy: { createdAt: "desc" },
+      take: safeLimit,
+      select: {
+        id: true,
+        actorEmail: true,
+        action: true,
+        targetEmail: true,
+        metadata: true,
+        createdAt: true,
+      },
+    })
+    return { success: true, data: logs }
+  } catch (error) {
+    if (isNextDynamicError(error)) throw error
+    console.error("Error fetching admin audit logs:", error)
+    return { success: false, error: "ADMIN_AUDIT_LIST_FAILED" }
   }
 }
 
@@ -1842,15 +2171,14 @@ export async function getUsersWithPagination(params: {
 // 一律经由 changePassword 强制校验旧密码，且身份以会话为准，
 // 不再信任客户端传入的 userId
 export async function updateUser(
-  id: string,
   data: {
     email?: string
     name?: string | null
     avatar?: string
   }
 ) {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const session = await getAdminSession()
+  if (!session) return { success: false, error: "Unauthorized" }
   try {
     type UserUpdateData = {
       email?: string
@@ -1858,15 +2186,61 @@ export async function updateUser(
       avatar?: string | null
     }
 
-    const updateData: UserUpdateData = {
-      email: data.email,
-      name: data.name,
-      avatar: data.avatar,
+    const updateData: UserUpdateData = {}
+
+    if (data.email !== undefined) {
+      const email = data.email.trim().toLowerCase()
+      if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { success: false, error: "ADMIN_EMAIL_INVALID" }
+      }
+      const users = await prisma.user.findMany({
+        select: { id: true, email: true },
+      })
+      if (
+        users.some(
+          (user) =>
+            user.id !== session.userId && user.email.toLowerCase() === email
+        )
+      ) {
+        return { success: false, error: "ADMIN_EMAIL_EXISTS" }
+      }
+      updateData.email = email
+    }
+    if (data.name !== undefined) {
+      const name = data.name?.trim() || null
+      if (name && name.length > 100) {
+        return { success: false, error: "ADMIN_NAME_TOO_LONG" }
+      }
+      updateData.name = name
+    }
+    if (data.avatar !== undefined) {
+      const avatar = data.avatar.trim()
+      if (avatar.length > 2048) {
+        return { success: false, error: "ADMIN_AVATAR_TOO_LONG" }
+      }
+      if (avatar) {
+        try {
+          const parsed = new URL(avatar)
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            return { success: false, error: "ADMIN_AVATAR_INVALID" }
+          }
+        } catch {
+          return { success: false, error: "ADMIN_AVATAR_INVALID" }
+        }
+      }
+      updateData.avatar = avatar || null
     }
 
     const user = await prisma.user.update({
-      where: { id },
+      where: { id: session.userId },
       data: updateData,
+    })
+    await recordAdminAudit({
+      actorId: session.userId,
+      actorEmail: user.email,
+      action: "PROFILE_UPDATED",
+      targetUserId: user.id,
+      targetEmail: user.email,
     })
     revalidatePath("/admin/users")
     // 只回传安全字段，避免 password 哈希随响应外泄（内存模式下
@@ -1893,12 +2267,11 @@ export async function changePassword(
   currentPassword: string,
   newPassword: string
 ) {
-  const session = await getAdminSession()
+  const session = await getAdminSession({ allowPasswordChangeRequired: true })
   if (!session) return { success: false, error: "Unauthorized" }
   try {
-    if (typeof newPassword !== "string" || newPassword.length < 6) {
-      return { success: false, error: "PASSWORD_TOO_SHORT" }
-    }
+    const passwordError = validateAdminPassword(newPassword)
+    if (passwordError) return { success: false, error: passwordError }
     const user = await prisma.user.findUnique({
       where: { id: session.userId },
     })
@@ -1918,7 +2291,15 @@ export async function changePassword(
         password: await bcrypt.hash(newPassword, 10),
         // 记录改密时间：getAdminSession 会与 token 签发时间比对，吊销改密前签发的所有旧会话
         passwordChangedAt: new Date(),
+        mustChangePassword: false,
       },
+    })
+    await recordAdminAudit({
+      actorId: session.userId,
+      actorEmail: session.email,
+      action: "PASSWORD_CHANGED",
+      targetUserId: user.id,
+      targetEmail: user.email,
     })
     revalidatePath("/admin/users")
     return { success: true }
@@ -1988,8 +2369,8 @@ export async function searchSites(query: string) {
 export async function getSystemSettings() {
   // 管理员专用：完整设置行含 enabledPlugins/pluginConfigs 等敏感字段，
   // 本文件所有导出函数皆可被客户端直接 RPC，无鉴权的读取等于公开泄露
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     const settings = await getSystemSettingsRecord()
     return { success: true, data: settings }
@@ -2139,8 +2520,8 @@ export async function updateSystemSettings(data: {
   customBodyCode?: string | null
   enableAnimations?: boolean
 }) {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     // 白名单过滤：只保留已知字段，丢弃任何额外注入的键
     const whitelisted = Object.fromEntries(
@@ -2217,8 +2598,8 @@ export async function updateSystemSettings(data: {
 // 数据导出：workspace 模式导出当前后台选中工作区（兼容旧格式数组）；
 // full 模式导出含工作区结构与域名绑定的全量备份
 export async function exportData(mode: "workspace" | "full" = "workspace") {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     if (mode === "full") {
       const workspaces = await prisma.workspace.findMany({
@@ -2347,8 +2728,8 @@ export async function exportData(mode: "workspace" | "full" = "workspace") {
 
 // Chrome书签导出（HTML格式，仅基本字段，兼容浏览器；按当前选中工作区导出）
 export async function exportBookmarks() {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     const workspace = await getAdminWorkspace()
     const categories = await prisma.category.findMany({
@@ -2545,8 +2926,8 @@ export async function importData(
   jsonData: any,
   mode: 'overwrite' | 'append'
 ) {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     // 全量备份格式：分流到独立处理
     if (jsonData && typeof jsonData === 'object' && Array.isArray(jsonData.workspaces)) {
@@ -2810,8 +3191,8 @@ export async function importBookmarks(
   html: string,
   mode: 'overwrite' | 'append'
 ) {
-  const unauthorized = await requireAdmin()
-  if (unauthorized) return unauthorized
+  const owner = await requireOwner()
+  if (!owner.success) return owner
   try {
     const { parseChromeBookmarks } = await import('./bookmarks')
     const parsed = parseChromeBookmarks(html)

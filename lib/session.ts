@@ -58,15 +58,18 @@ interface SessionPayload {
   r: string
   /** 过期时间（Unix 秒） */
   e: number
-  /** 签发时间（Unix 秒）：供改密后吊销旧会话比对（旧版 token 无此字段） */
+  /** 签发时间（Unix 毫秒；旧 token 为秒）：供改密后吊销旧会话比对 */
   i?: number
+  /** 首次登录必须修改密码 */
+  m?: boolean
 }
 
 export interface SessionInfo {
   userId: string
   role: string
-  /** 签发时间（Unix 秒）；旧版 token 无此字段时为 undefined */
+  /** 签发时间（新 token 为 Unix 毫秒，旧 token 为秒） */
   iat?: number
+  mustChangePassword?: boolean
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -109,13 +112,15 @@ async function getHmacKey(): Promise<CryptoKey> {
  */
 export async function createSessionToken(
   userId: string,
-  role: string
+  role: string,
+  mustChangePassword = false
 ): Promise<string> {
   const payload: SessionPayload = {
     u: userId,
     r: role,
     e: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
-    i: Math.floor(Date.now() / 1000),
+    i: Date.now(),
+    m: mustChangePassword,
   }
   const encoder = new TextEncoder()
   const body = bytesToBase64Url(encoder.encode(JSON.stringify(payload)))
@@ -163,6 +168,7 @@ export async function verifySessionToken(
       userId: payload.u,
       role: payload.r,
       iat: typeof payload.i === "number" ? payload.i : undefined,
+      mustChangePassword: payload.m === true,
     }
   } catch {
     return null

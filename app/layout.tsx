@@ -78,7 +78,10 @@ export default async function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            <AdminAuthProvider initialIsAdmin={initialIsAdmin}>
+            <AdminAuthProvider
+              initialIsAdmin={initialIsAdmin}
+              initialRole={session?.role ?? null}
+            >
               {children}
               <SonnerToaster position="bottom-right" richColors />
               <AnimationSync />

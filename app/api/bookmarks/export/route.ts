@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
 import { exportBookmarks } from '@/lib/actions'
 import { generateChromeBookmarks } from '@/lib/bookmarks'
-import { getAdminSession } from '@/lib/api-auth'
+import { getOwnerSession } from '@/lib/api-auth'
 
 export async function GET() {
-  if (!(await getAdminSession())) {
+  if (!(await getOwnerSession())) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
   try {
